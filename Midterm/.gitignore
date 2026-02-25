@@ -1,0 +1,10 @@
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local app data
+medication_log.json
+habit_log.json
