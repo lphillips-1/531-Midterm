@@ -13,6 +13,7 @@ from pathlib import Path
 
 from openai import OpenAI
 from paho.mqtt import client as mqtt_client
+from reed_backend import REED_MAP, get_reed_status, reset_reed_status
 
 
 DATA_FILE = Path("medication_log.json")
@@ -185,6 +186,7 @@ class HabitTrackerUI:
         self._build_layout()
         self._initialize_simulated_day_display()
         self._draw_calendar()
+        self.refresh_reed_dashboard()
 
     def _build_layout(self) -> None:
         header_frame = tk.Frame(self.root, bg="#f4f6f8")
@@ -243,8 +245,57 @@ class HabitTrackerUI:
             pady=6,
         ).pack(side="left", padx=6)
 
-        self.calendar_frame = tk.Frame(self.root, bg="#f4f6f8")
-        self.calendar_frame.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+        content_frame = tk.Frame(self.root, bg="#f4f6f8")
+        content_frame.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+
+        self.calendar_frame = tk.Frame(content_frame, bg="#f4f6f8")
+        self.calendar_frame.pack(side="left", fill="both", expand=True, padx=(0, 12))
+
+        reed_frame = tk.Frame(content_frame, bg="#e5eef9", relief="solid", bd=1)
+        reed_frame.pack(side="right", fill="y")
+
+        tk.Label(
+            reed_frame,
+            text="Weekly Reed Switch Status",
+            font=("Segoe UI", 11, "bold"),
+            bg="#e5eef9",
+            fg="#111827",
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        tk.Label(
+            reed_frame,
+            text="Live GPIO state and completed cycle detection",
+            font=("Segoe UI", 9),
+            bg="#e5eef9",
+            fg="#475569",
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.reed_labels: dict[str, tk.Label] = {}
+        for day in REED_MAP.keys():
+            label = tk.Label(
+                reed_frame,
+                text=day,
+                width=24,
+                anchor="w",
+                font=("Segoe UI", 10, "bold"),
+                bg="#fee2e2",
+                fg="#7f1d1d",
+                padx=10,
+                pady=8,
+            )
+            label.pack(fill="x", padx=12, pady=4)
+            self.reed_labels[day] = label
+
+        tk.Button(
+            reed_frame,
+            text="Reset Reed Progress",
+            command=self._handle_reset_reed_status,
+            bg="#1d4ed8",
+            fg="#ffffff",
+            relief="flat",
+            padx=10,
+            pady=6,
+        ).pack(anchor="w", padx=12, pady=(10, 12))
 
         legend = tk.Label(
             self.root,
@@ -438,6 +489,35 @@ class HabitTrackerUI:
             self.selected_medication_var.set(f"Medication: {medication_name.strip()}")
         else:
             self.selected_medication_var.set("Medication: not selected in setup")
+
+    def _handle_reset_reed_status(self) -> None:
+        reset_reed_status()
+        self.status_var.set("Reed switch progress reset.")
+        self.refresh_reed_dashboard()
+
+    def refresh_reed_dashboard(self) -> None:
+        status = get_reed_status()
+
+        for day, label in self.reed_labels.items():
+            item = status.get(
+                day,
+                {"state": "UNKNOWN", "progress": 0, "correct": False},
+            )
+
+            if item["correct"]:
+                label.config(
+                    bg="#dcfce7",
+                    fg="#166534",
+                    text=f"{day}: CORRECT  |  {item['state']}",
+                )
+            else:
+                label.config(
+                    bg="#fee2e2",
+                    fg="#991b1b",
+                    text=f"{day}: {item['state']}  |  progress {item['progress']}/3",
+                )
+
+        self.root.after(500, self.refresh_reed_dashboard)
 
     def _set_facts_text(self, text: str) -> None:
         self.facts_text.delete("1.0", tk.END)
