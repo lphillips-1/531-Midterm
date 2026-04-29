@@ -4,9 +4,11 @@ import json
 import tkinter as tk
 import urllib.parse
 import urllib.request
+import argparse
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 from paho.mqtt import client as mqtt_client
+from reed_backend import GPIO, REED_MAP, get_reed_status, reset_reed_status
 
 REPORT_INTERVAL_SECONDS = 5
 TOTAL_RUNTIME_SECONDS = 90
@@ -14,6 +16,16 @@ MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
 MQTT_TOPIC = "sensor/daily_bit"
 MQTT_CLIENT_ID = f"daily-bit-sim-{int(time.time())}"
+
+WEEKDAY_TO_INDEX = {
+    "Monday": 0,
+    "Tuesday": 1,
+    "Wednesday": 2,
+    "Thursday": 3,
+    "Friday": 4,
+    "Saturday": 5,
+    "Sunday": 6,
+}
 
 
 def query_openfda_medications(search_term: str = "", limit: int = 8):
@@ -709,6 +721,77 @@ def connect_mqtt(broker=MQTT_BROKER, port=MQTT_PORT, client_id=MQTT_CLIENT_ID):
     return client
 
 
+def week_date_for_day(day_name: str, reference: datetime | None = None) -> datetime:
+    now = reference or datetime.now()
+    week_start = now - timedelta(days=now.weekday())
+    offset = WEEKDAY_TO_INDEX[day_name]
+    return week_start + timedelta(days=offset)
+
+
+def publish_reed_switch_events(
+    account_mode="for_myself",
+    account_setup=None,
+    broker=MQTT_BROKER,
+    port=MQTT_PORT,
+    topic=MQTT_TOPIC,
+    poll_interval=0.2,
+    reset_progress_on_start=False,
+):
+    client = connect_mqtt(broker=broker, port=port, client_id=f"reed-switch-publisher-{int(time.time())}")
+    published_days = set()
+
+    if reset_progress_on_start:
+        reset_reed_status()
+
+    print("Publishing real reed-switch completion events.")
+    print(f"Watching days: {', '.join(REED_MAP.keys())}")
+
+    try:
+        while True:
+            status = get_reed_status()
+
+            for day_name, item in status.items():
+                if not item["correct"] or day_name in published_days:
+                    continue
+
+                event_time = week_date_for_day(day_name).replace(
+                    hour=datetime.now().hour,
+                    minute=datetime.now().minute,
+                    second=datetime.now().second,
+                    microsecond=0,
+                )
+                payload = {
+                    "day_name": day_name,
+                    "simulated_time": event_time.isoformat(),
+                    "value": 1,
+                    "account_mode": account_mode,
+                    "account_setup": account_setup or {},
+                    "source": "reed_switch",
+                    "reed_state": item["state"],
+                    "reed_progress": item["progress"],
+                }
+
+                result = client.publish(topic, json.dumps(payload))
+                status_text = (
+                    "published"
+                    if result.rc == mqtt_client.MQTT_ERR_SUCCESS
+                    else f"publish_failed_rc_{result.rc}"
+                )
+                print(
+                    f"{day_name}: completion detected -> {event_time:%Y-%m-%d %I:%M %p} [{status_text}]"
+                )
+                published_days.add(day_name)
+
+            if len(published_days) == len(REED_MAP):
+                print("All weekly reed-switch completion events have been published.")
+                break
+
+            time.sleep(poll_interval)
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+
 def run_simulation(
     report_interval=REPORT_INTERVAL_SECONDS,
     total_runtime=TOTAL_RUNTIME_SECONDS,
@@ -763,6 +846,29 @@ def run_simulation(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="MQTT publisher for demo or live reed-switch completion events.")
+    parser.add_argument("--broker", default=MQTT_BROKER)
+    parser.add_argument("--port", type=int, default=MQTT_PORT)
+    parser.add_argument("--topic", default=MQTT_TOPIC)
+    parser.add_argument(
+        "--source",
+        choices=("auto", "simulation", "reed"),
+        default="auto",
+        help="Publishing source: random simulation, live reed switches, or auto-detect.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.2,
+        help="Polling interval in seconds for reed-switch mode.",
+    )
+    parser.add_argument(
+        "--reset-reed-on-start",
+        action="store_true",
+        help="Reset reed-switch progress before starting live monitoring.",
+    )
+    args = parser.parse_args()
+
     mode = choose_account_mode()
     if mode is None:
         print("Setup closed. Simulation not started.")
@@ -790,5 +896,31 @@ if __name__ == "__main__":
                 print("Request setup cancelled. Simulation not started.")
                 raise SystemExit(0)
 
+        publish_source = args.source
+        if publish_source == "auto":
+            publish_source = "reed" if GPIO is not None else "simulation"
+
+        if publish_source == "reed" and GPIO is None:
+            print("RPi.GPIO is unavailable on this machine. Falling back to random simulation.")
+            publish_source = "simulation"
+
         print(f"Setup complete: {mode}")
-        run_simulation(seed=42, account_mode=mode, account_setup=setup_data)  # Remove seed for non-reproducible randomness
+        if publish_source == "reed":
+            publish_reed_switch_events(
+                account_mode=mode,
+                account_setup=setup_data,
+                broker=args.broker,
+                port=args.port,
+                topic=args.topic,
+                poll_interval=args.poll_interval,
+                reset_progress_on_start=args.reset_reed_on_start,
+            )
+        else:
+            run_simulation(
+                seed=42,
+                account_mode=mode,
+                account_setup=setup_data,
+                broker=args.broker,
+                port=args.port,
+                topic=args.topic,
+            )  # Remove seed for non-reproducible randomness
